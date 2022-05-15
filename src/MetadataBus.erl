@@ -3,6 +3,7 @@
 -include_lib("gproc/src/gproc_int.hrl").
 
 -export([ create/2
+        , delete/1
         , disable/1
         , enable/1
         , raiseMsg/2
@@ -27,9 +28,26 @@
 
 create(BusName, InitalMetadata) ->
   fun() ->
-      gproc:reg(?gprocNameKey(BusName), undefined, [?metadataAttribute(InitalMetadata)]),
+      NameKey = ?gprocNameKey(BusName),
+      gproc:reg(NameKey, undefined, [?metadataAttribute(InitalMetadata)]),
+      _ = spawn_link(fun() -> create_watcher(BusName, NameKey) end),
       raiseMsgInt(BusName, {metadataMsg, InitalMetadata}),
       BusName
+  end.
+
+
+create_watcher(BusName, NameKey) ->
+  Ref = gproc:monitor(NameKey),
+  receive
+    {gproc, unreg, Ref, NameKey } ->
+      ok
+  end,
+  raiseMsgInt(BusName, {busTerminated}).
+
+delete(BusName) ->
+  fun() ->
+      gproc:unreg(?gprocNameKey(BusName)),
+      ?unit
   end.
 
 updateMetadata(BusName, Metadata) ->
@@ -41,7 +59,7 @@ updateMetadata(BusName, Metadata) ->
 
 subscribeImpl(Enabled, MetadataConstructor, BusName, Mapper) ->
   fun() ->
-      MaybeMetadata = subscribeLocked(Enabled, BusName, ?just(MetadataConstructor)),
+      MaybeMetadata = subscribeLocked(Enabled, BusName),
       case MaybeMetadata of
         ?just(ExistingMetadata) ->
           maybe_send(self(), Mapper(MetadataConstructor(ExistingMetadata)));
@@ -54,7 +72,7 @@ subscribeImpl(Enabled, MetadataConstructor, BusName, Mapper) ->
 
 subscribeExistingImpl(Enabled, BusName, Mapper) ->
   fun() ->
-      MaybeMetadata = subscribeLocked(Enabled, BusName, ?nothing),
+      MaybeMetadata = subscribeLocked(Enabled, BusName),
       case MaybeMetadata of
         ?just(_) ->
           true = gproc:set_value(?gprocPropertyKey(BusName), ?enabled(Mapper));
@@ -64,7 +82,7 @@ subscribeExistingImpl(Enabled, BusName, Mapper) ->
       MaybeMetadata
   end.
 
-subscribeLocked(enabled, BusName, MaybeMetadataConstructor) ->
+subscribeLocked(enabled, BusName) ->
   try
     true = gproc:reg(?gprocPropertyKey(BusName), ?locked),
     Metadata = gproc:get_attribute(?gprocNameKey(BusName), ?metadataKey),
@@ -106,7 +124,7 @@ enable(BusName) ->
 unsubscribe(BusName) ->
   fun() ->
       Key = ?gprocPropertyKey(BusName),
-      gproc:unreg(Key),
+      catch gproc:unreg(Key),
       ?unit
   end.
 

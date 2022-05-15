@@ -10,10 +10,10 @@ When creating a new Spago project, you can use
 `spago init --no-comments` or `spago init -C`
 to generate this file without the comments in this block.
 -}
-{ name = "erl-simplebus"
+{ name = "erl-bus"
 , backend = "purerl"
 , dependencies =
   [ "effect", "erl-atom", "erl-process", "maybe", "prelude", "psci-support" ]
 , packages = ./packages.dhall
-, sources = [ "src/**/*.purs", "test/**/*.purs" ]
+, sources = [ "src/**/*.purs" ]
 }

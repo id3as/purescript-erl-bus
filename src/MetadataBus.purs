@@ -4,6 +4,7 @@ module MetadataBus
   , BusRef
   , busRef
   , create
+  , delete
   , raise
   , subscribe
   , subscribeExisting
@@ -27,6 +28,8 @@ newtype Bus name msg metadata
 newtype BusRef :: Type -> Type -> Type -> Type
 newtype BusRef name msg metadata
   = BusRef name
+instance eqBusRef :: (Eq name) => Eq (BusRef name msg metadata) where
+  eq (BusRef name1) (BusRef name2) = eq name1 name2
 
 busRef :: forall name msg metadata. name -> BusRef name msg metadata
 busRef = BusRef
@@ -37,6 +40,7 @@ data BusMsg msg metadata
   | BusTerminated
 
 derive instance (Eq msg, Eq metadata) => Eq (BusMsg msg metadata)
+
 
 instance (Show msg, Show metadata) => Show (BusMsg msg metadata) where
   show (DataMsg msg) = "DataMsg " <> show msg
@@ -55,6 +59,7 @@ type SubscribeExistingAPI
   = forall m name msg metadata msgOut. HasSelf m msgOut => MonadEffect m => BusRef name msg metadata -> (BusMsg msg metadata -> Maybe msgOut) -> m (Maybe metadata)
 
 foreign import create :: forall name msg metadata. BusRef name msg metadata -> metadata -> Effect (Bus name msg metadata)
+foreign import delete :: forall name msg metadata. Bus name msg metadata -> Effect Unit
 foreign import updateMetadata :: forall name msg metadata. Bus name msg metadata -> metadata -> Effect Unit
 
 subscribe :: SubscribeAPI
@@ -85,4 +90,4 @@ raise bus = raiseMsg bus <<< DataMsg
 foreign import raiseMsg :: forall name msg metadata. Bus name msg metadata -> BusMsg msg metadata -> Effect Unit
 foreign import enable :: forall name msg metadata. Bus name msg metadata -> Effect Unit
 foreign import disable :: forall name msg metadata. Bus name msg metadata -> Effect Unit
-foreign import unsubscribe :: forall name msg metadata. Bus name msg metadata -> Effect Unit
+foreign import unsubscribe :: forall name msg metadata. BusRef name msg metadata -> Effect Unit

@@ -3,13 +3,14 @@ module Test.MetadataBus (mbTests) where
 import Prelude
 
 import Data.Maybe (Maybe(..))
+import Data.Time.Duration (Milliseconds(..))
 import Effect (Effect)
 import Effect.Class (liftEffect)
 import Erl.Atom (Atom, atom)
-import Erl.Process (Process, ProcessM, receive, self, spawnLink, unsafeRunProcessM)
+import Erl.Process (Process, ProcessM, receive, receiveWithTimeout, self, spawnLink, unsafeRunProcessM)
 import Erl.Process as Process
 import Erl.Test.EUnit as Test
-import MetadataBus (Bus, BusMsg(..), BusRef, busRef, create, raise, subscribe, subscribeExisting, updateMetadata)
+import MetadataBus (Bus, BusMsg(..), BusRef, busRef, create, delete, raise, subscribe, subscribeExisting, unsubscribe, updateMetadata)
 import Test.Assert (assertEqual, assertEqual', assertTrue')
 
 data MbMsg
@@ -27,6 +28,7 @@ instance Show Metadata where
 data SenderMsg
   = SetMetadata Metadata
   | RaiseMsg MbMsg
+  | DeleteBus
   | End
 
 data RunnerMsg
@@ -50,12 +52,6 @@ type SenderRequest
 type SubscriberMsg
   = BusMsg MbMsg Metadata
 
-data Timeout
-  = Timeout
-derive instance Eq Timeout
-instance Show Timeout where
-  show Timeout = "Timeout"
-
 mbTests :: Test.TestSuite
 mbTests = do
   Test.suite "metadata bus tests" do
@@ -70,6 +66,9 @@ subscribeTests = do
     canUpdateMetadataPriorToSubscription
     canUpdateMetadataPostSubscription
     canReceiveMessages
+    afterUnsubscribeYouReceiveNoMessages
+    terminateMessageWhenSenderDeletesBus
+    terminateMessageWhenSenderExits
 
 nonExistentBus :: Test.TestSuite
 nonExistentBus = do
@@ -202,6 +201,88 @@ canReceiveMessages = do
     liftEffect $ Process.send parent (SubscriberStepCompleted 0)
     await $ DataMsg $ TestMsg 1
     await $ DataMsg $ TestMsg 2
+    liftEffect $ Process.send parent Complete
+
+afterUnsubscribeYouReceiveNoMessages :: Test.TestSuite
+afterUnsubscribeYouReceiveNoMessages = do
+  Test.test "Data messages are no longer sent after unsubscribe" do
+    unsafeRunProcessM theTest
+  where
+  theTest :: ProcessM RunnerMsg Unit
+  theTest = do
+    me <- self
+    senderPid <- liftEffect $ spawnLink $ sender me (TestMetadata 0) (Just MetadataSet)
+    await MetadataSet
+    _ <- liftEffect $ spawnLink $ subscriber me
+    await $ SubscriberStepCompleted 0
+    liftEffect $ Process.send senderPid { req: RaiseMsg (TestMsg 1), resp: Nothing }
+    await $ SubscriberStepCompleted 1
+    liftEffect $ Process.send senderPid { req: RaiseMsg (TestMsg 2), resp: Nothing }
+    await $ Complete
+    liftEffect $ Process.send senderPid $ { req: End, resp: Nothing }
+
+  subscriber :: Process RunnerMsg -> ProcessM SubscriberMsg Unit
+  subscriber parent = do
+    subscribe testBus pure
+    await $ MetadataMsg $TestMetadata 0
+    liftEffect $ Process.send parent (SubscriberStepCompleted 0)
+    await $ DataMsg $ TestMsg 1
+    liftEffect do
+      unsubscribe testBus
+      Process.send parent (SubscriberStepCompleted 1)
+    awaitWithTimeout (Milliseconds 10.0) (DataMsg $ TestMsg 999) (DataMsg $ TestMsg 999)
+    liftEffect $ Process.send parent Complete
+
+terminateMessageWhenSenderDeletesBus  :: Test.TestSuite
+terminateMessageWhenSenderDeletesBus = do
+  Test.test "Subscribers are notified when the sender exists" do
+    unsafeRunProcessM theTest
+  where
+  theTest :: ProcessM RunnerMsg Unit
+  theTest = do
+    me <- self
+    senderPid <- liftEffect $ spawnLink $ sender me (TestMetadata 0) (Just MetadataSet)
+    await MetadataSet
+    _ <- liftEffect $ spawnLink $ subscriber me
+    await $ SubscriberStepCompleted 0
+    liftEffect $ Process.send senderPid { req: RaiseMsg (TestMsg 1), resp: Nothing }
+    liftEffect $ Process.send senderPid { req: DeleteBus, resp: Nothing }
+    await $ Complete
+    liftEffect $ Process.send senderPid $ { req: End, resp: Nothing }
+
+  subscriber :: Process RunnerMsg -> ProcessM SubscriberMsg Unit
+  subscriber parent = do
+    subscribe testBus pure
+    await $ MetadataMsg $TestMetadata 0
+    liftEffect $ Process.send parent (SubscriberStepCompleted 0)
+    await $ DataMsg $ TestMsg 1
+    await $ BusTerminated
+    liftEffect $ Process.send parent Complete
+
+
+terminateMessageWhenSenderExits  :: Test.TestSuite
+terminateMessageWhenSenderExits = do
+  Test.test "Subscribers are notified when the sender exists" do
+    unsafeRunProcessM theTest
+  where
+  theTest :: ProcessM RunnerMsg Unit
+  theTest = do
+    me <- self
+    senderPid <- liftEffect $ spawnLink $ sender me (TestMetadata 0) (Just MetadataSet)
+    await MetadataSet
+    _ <- liftEffect $ spawnLink $ subscriber me
+    await $ SubscriberStepCompleted 0
+    liftEffect $ Process.send senderPid { req: RaiseMsg (TestMsg 1), resp: Nothing }
+    liftEffect $ Process.send senderPid $ { req: End, resp: Nothing }
+    await $ Complete
+
+  subscriber :: Process RunnerMsg -> ProcessM SubscriberMsg Unit
+  subscriber parent = do
+    subscribe testBus pure
+    await $ MetadataMsg $TestMetadata 0
+    liftEffect $ Process.send parent (SubscriberStepCompleted 0)
+    await $ DataMsg $ TestMsg 1
+    await $ BusTerminated
     liftEffect $ Process.send parent Complete
 
 
@@ -347,6 +428,11 @@ await what = do
   msg <- receive
   liftEffect $ assertEqual { actual: msg, expected: what }
 
+awaitWithTimeout ∷ ∀ (a ∷ Type). Eq a ⇒ Show a ⇒ Milliseconds -> a -> a → ProcessM a Unit
+awaitWithTimeout duration toMsg expected = do
+  msg <- receiveWithTimeout duration toMsg
+  liftEffect $ assertEqual { actual: msg, expected }
+
 sender :: Process RunnerMsg -> Metadata -> Maybe RunnerMsg -> ProcessM SenderRequest Unit
 sender parent initialMd initResp = do
   theBus <-
@@ -361,10 +447,6 @@ sender parent initialMd initResp = do
   senderLoop bus = do
     msg <- receive
     case msg.req of
-      End ->
-        liftEffect do
-          maybeRespond msg.resp
-          pure unit
       SetMetadata a -> do
         liftEffect do
           updateMetadata bus a
@@ -375,6 +457,16 @@ sender parent initialMd initResp = do
           raise bus a
           maybeRespond msg.resp
         senderLoop bus
+      DeleteBus -> do
+        liftEffect do
+          delete bus
+          maybeRespond msg.resp
+        senderLoop bus
+      End ->
+        liftEffect do
+          maybeRespond msg.resp
+          pure unit
+
 
   maybeRespond Nothing = pure unit
   maybeRespond (Just msg) = Process.send parent msg
