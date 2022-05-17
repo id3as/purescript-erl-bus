@@ -10,9 +10,10 @@ import Effect.Class (liftEffect)
 import Erl.Atom (Atom, atom)
 import Erl.Process (Process, ProcessM, receive, receiveWithTimeout, self, spawnLink, unsafeRunProcessM)
 import Erl.Process as Process
+import Erl.Process.Raw as Raw
 import Erl.Test.EUnit as Test
 import Partial.Unsafe (unsafeCrashWith)
-import StateBus (class UpdateState, Bus, BusMsg(..), BusRef, Generation, InitialState, VersionedMsg, busRef, create, delete, raise, subscribe, subscribeExisting, unsubscribe, validateMsg)
+import StateBus (class UpdateState, Bus, BusMsg(..), BusRef, Generation, InitialState, VersionedMsg, busRef, create, delete, raise, subscribe, subscribeExisting, unsubscribe, updateState, validateMsg)
 import Test.Assert (assertEqual, assertEqual', assertTrue')
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -67,11 +68,11 @@ subscribeTests :: Test.TestSuite
 subscribeTests = do
   Test.suite "subscribe tests" do
     nonExistentBus
-    -- createThenSubscribe
-    -- canUpdateStatePriorToSubscription
-    -- canUpdateStatePostSubscription
-    -- canReceiveMessages
-    -- afterUnsubscribeYouReceiveNoMessages
+    createThenSubscribe
+    canUpdateStatePriorToSubscription
+    canUpdateStatePostSubscription
+    canReceiveMessages
+    afterUnsubscribeYouReceiveNoMessages
     -- terminateMessageWhenSenderDeletesBus
     -- terminateMessageWhenSenderExits
 
@@ -105,10 +106,10 @@ nonExistentBus = do
     awaitValidatedMsg generation (TestMsg 2)
     liftEffect $ Process.send parent Complete
 
-unsafeGeneration :: Int -> Generation
-unsafeGeneration = unsafeCoerce
+-- unsafeGeneration :: Int -> Generation
+-- unsafeGeneration = unsafeCoerce
 
-{-
+
 createThenSubscribe :: Test.TestSuite
 createThenSubscribe = do
   Test.test "Can subscribe after a bus is created" do
@@ -127,9 +128,8 @@ createThenSubscribe = do
   subscriber :: Process RunnerMsg -> ProcessM SubscriberMsg Unit
   subscriber parent = do
     subscribe testBus Just
-    await $ StateMsg (TestState 0)
+    void $ awaitInitialState (TestState 0)
     liftEffect $ Process.send parent (SubscriberStepCompleted 1)
-
 
 canUpdateStatePriorToSubscription :: Test.TestSuite
 canUpdateStatePriorToSubscription = do
@@ -142,10 +142,10 @@ canUpdateStatePriorToSubscription = do
     senderPid <- liftEffect $ spawnLink $ sender me (TestState 0) Nothing
     liftEffect
       $ Process.send senderPid
-          { req: SetState (TestState 1)
-          , resp: Just StateSet
+          { req: RaiseMsg (TestMsg 1)
+          , resp: Just MsgSent
           }
-    await StateSet
+    await MsgSent
     _ <- liftEffect $ spawnLink $ subscriber me
     await Complete
     liftEffect $ Process.send senderPid $ { req: End, resp: Nothing } -- allow the sender to exit so we are clean for the next test
@@ -154,12 +154,13 @@ canUpdateStatePriorToSubscription = do
   subscriber :: Process RunnerMsg -> ProcessM SubscriberMsg Unit
   subscriber parent = do
     subscribe testBus pure
-    await $ StateMsg (TestState 1)
+    void $ awaitInitialState (TestState (0 + 1))
     liftEffect $ Process.send parent Complete
+
 
 canUpdateStatePostSubscription :: Test.TestSuite
 canUpdateStatePostSubscription = do
-  Test.test "Changes to state are sent to active subscribers" do
+  Test.test "Active subscribers receive messages that allow them to keep up to date with state" do
     unsafeRunProcessM theTest
   where
   theTest :: ProcessM RunnerMsg Unit
@@ -169,8 +170,7 @@ canUpdateStatePostSubscription = do
     await StateSet
     _ <- liftEffect $ spawnLink $ subscriber me
     await $ SubscriberStepCompleted 0
-    liftEffect
-      $ Process.send senderPid { req: SetState (TestState 1), resp: Nothing }
+    liftEffect $ Process.send senderPid { req: RaiseMsg (TestMsg 1), resp: Nothing }
     await $ SubscriberStepCompleted 1
     liftEffect $ Process.send senderPid $ { req: End, resp: Nothing }
     pure unit
@@ -178,11 +178,13 @@ canUpdateStatePostSubscription = do
   subscriber :: Process RunnerMsg -> ProcessM SubscriberMsg Unit
   subscriber parent = do
     subscribe testBus pure
-    await $ StateMsg $TestState 0
+    initialGenreation <- awaitInitialState (TestState 0)
     liftEffect $ Process.send parent (SubscriberStepCompleted 0)
-    await $ StateMsg $TestState 1
-    liftEffect $ Process.send parent (SubscriberStepCompleted 1)
-
+    awaitValidatedMsg initialGenreation $ TestMsg 1
+    let updatedState = updateState (TestMsg 1) (TestState 0)
+    liftEffect do
+      assertEqual {expected: TestState 1, actual: updatedState}
+      Process.send parent (SubscriberStepCompleted 1)
 
 canReceiveMessages :: Test.TestSuite
 canReceiveMessages = do
@@ -206,10 +208,10 @@ canReceiveMessages = do
   subscriber :: Process RunnerMsg -> ProcessM SubscriberMsg Unit
   subscriber parent = do
     subscribe testBus pure
-    await $ StateMsg $TestState 0
+    initialGenreation <- awaitInitialState (TestState 0)
     liftEffect $ Process.send parent (SubscriberStepCompleted 0)
-    await $ DataMsg $ TestMsg 1
-    await $ DataMsg $ TestMsg 2
+    awaitValidatedMsg initialGenreation $ TestMsg 1
+    awaitValidatedMsg initialGenreation $ TestMsg 2
     liftEffect $ Process.send parent Complete
 
 afterUnsubscribeYouReceiveNoMessages :: Test.TestSuite
@@ -233,15 +235,17 @@ afterUnsubscribeYouReceiveNoMessages = do
   subscriber :: Process RunnerMsg -> ProcessM SubscriberMsg Unit
   subscriber parent = do
     subscribe testBus pure
-    await $ StateMsg $TestState 0
+    initialGenreation <- awaitInitialState (TestState 0)
     liftEffect $ Process.send parent (SubscriberStepCompleted 0)
-    await $ DataMsg $ TestMsg 1
+    awaitValidatedMsg initialGenreation $ TestMsg 1
     liftEffect do
+      Process.send parent Complete
       unsubscribe testBus
       Process.send parent (SubscriberStepCompleted 1)
-    awaitWithTimeout (Milliseconds 10.0) (DataMsg $ TestMsg 999) (DataMsg $ TestMsg 999)
-    liftEffect $ Process.send parent Complete
+      awaitTimeout (Milliseconds 10.0)
+      Process.send parent Complete
 
+{-
 terminateMessageWhenSenderDeletesBus  :: Test.TestSuite
 terminateMessageWhenSenderDeletesBus = do
   Test.test "Subscribers are notified when the sender exists" do
@@ -461,10 +465,15 @@ awaitValidatedMsg generation what = do
       unsafeCrashWith "Not versioned msg" { actual: msg, expected: what }
 
 
-awaitWithTimeout ∷ ∀ (a ∷ Type). Eq a ⇒ Show a ⇒ Milliseconds -> a -> a → ProcessM a Unit
-awaitWithTimeout duration toMsg expected = do
-  msg <- receiveWithTimeout duration toMsg
-  liftEffect $ assertEqual { actual: msg, expected }
+data TimeoutMsg = TimeoutMsg
+derive instance Eq TimeoutMsg
+instance Show TimeoutMsg where
+  show TimeoutMsg = "TimeoutMsg"
+
+--awaitWithTimeout ∷ ∀ (a ∷ Type). Eq a ⇒ Show a ⇒ Generation -> Milliseconds -> a -> a → ProcessM a Unit
+awaitTimeout duration = do
+  msg <- Raw.receiveWithTimeout duration TimeoutMsg
+  liftEffect $ assertEqual { actual: msg, expected: TimeoutMsg }
 
 sender :: Process RunnerMsg -> State -> Maybe RunnerMsg -> ProcessM SenderRequest Unit
 sender parent initialMd initResp = do
