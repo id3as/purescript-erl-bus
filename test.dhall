@@ -7,7 +7,10 @@ in    conf
             conf.dependencies #
             [ "assert"
             , "datetime"
+            , "debug"
             , "erl-kernel"
             , "erl-test-eunit"
+            , "partial"
+            , "unsafe-coerce"
             ]
       }

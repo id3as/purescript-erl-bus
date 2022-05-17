@@ -57,7 +57,7 @@ updateMetadata(BusName, Metadata) ->
       ?unit
   end.
 
-subscribeImpl(Enabled, MetadataConstructor, BusName, Mapper) ->
+subscribeImpl(Enabled, MetadataConstructor, BusName, Mapper) when Enabled =:= enabled -> %% Fail quickly if you try to call disabled until we have test
   fun() ->
       MaybeMetadata = subscribeLocked(Enabled, BusName),
       case MaybeMetadata of
@@ -70,9 +70,9 @@ subscribeImpl(Enabled, MetadataConstructor, BusName, Mapper) ->
       ?unit
   end.
 
-subscribeExistingImpl(Enabled, BusName, Mapper) ->
+subscribeExistingImpl(enabled, BusName, Mapper) ->
   fun() ->
-      MaybeMetadata = subscribeLocked(Enabled, BusName),
+      MaybeMetadata = subscribeLocked(enabled, BusName),
       case MaybeMetadata of
         ?just(_) ->
           true = gproc:set_value(?gprocPropertyKey(BusName), ?enabled(Mapper));
