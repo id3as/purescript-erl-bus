@@ -7,8 +7,9 @@ import Data.Time.Duration (Milliseconds(..))
 import Effect (Effect)
 import Effect.Class (liftEffect)
 import Erl.Atom (Atom, atom)
-import Erl.Process (Process, ProcessM, receive, receiveWithTimeout, self, spawnLink, unsafeRunProcessM)
+import Erl.Process (Process, ProcessM, receive, self, spawnLink, unsafeRunProcessM)
 import Erl.Process as Process
+import Erl.Process.Raw as Raw
 import Erl.Test.EUnit as Test
 import MetadataBus (Bus, BusMsg(..), BusRef, busRef, create, delete, raise, subscribe, subscribeExisting, unsubscribe, updateMetadata)
 import Test.Assert (assertEqual, assertEqual', assertTrue')
@@ -139,7 +140,7 @@ canUpdateMetadataPriorToSubscription = do
     await MetadataSet
     _ <- liftEffect $ spawnLink $ subscriber me
     await Complete
-    liftEffect $ Process.send senderPid $ { req: End, resp: Nothing } -- allow the sender to exit so we are clean for the next test
+    liftEffect $ Process.send senderPid $ { req: End, resp: Nothing }
     pure unit
 
   subscriber :: Process RunnerMsg -> ProcessM SubscriberMsg Unit
@@ -230,12 +231,12 @@ afterUnsubscribeYouReceiveNoMessages = do
     liftEffect do
       unsubscribe testBus
       Process.send parent (SubscriberStepCompleted 1)
-    awaitWithTimeout (Milliseconds 10.0) (DataMsg $ TestMsg 999) (DataMsg $ TestMsg 999)
+      awaitTimeout (Milliseconds 10.0)
     liftEffect $ Process.send parent Complete
 
 terminateMessageWhenSenderDeletesBus  :: Test.TestSuite
 terminateMessageWhenSenderDeletesBus = do
-  Test.test "Subscribers are notified when the sender exists" do
+  Test.test "Subscribers are notified when the sender exits" do
     unsafeRunProcessM theTest
   where
   theTest :: ProcessM RunnerMsg Unit
@@ -262,7 +263,7 @@ terminateMessageWhenSenderDeletesBus = do
 
 terminateMessageWhenSenderExits  :: Test.TestSuite
 terminateMessageWhenSenderExits = do
-  Test.test "Subscribers are notified when the sender exists" do
+  Test.test "Subscribers are notified when the sender exits" do
     unsafeRunProcessM theTest
   where
   theTest :: ProcessM RunnerMsg Unit
@@ -355,7 +356,7 @@ seCanUpdateMetadataPriorToSubscription = do
     await MetadataSet
     _ <- liftEffect $ spawnLink $ subscriber me
     await Complete
-    liftEffect $ Process.send senderPid $ { req: End, resp: Nothing } -- allow the sender to exit so we are clean for the next test
+    liftEffect $ Process.send senderPid $ { req: End, resp: Nothing }
     pure unit
 
   subscriber :: Process RunnerMsg -> ProcessM SubscriberMsg Unit
@@ -428,10 +429,15 @@ await what = do
   msg <- receive
   liftEffect $ assertEqual { actual: msg, expected: what }
 
-awaitWithTimeout ∷ ∀ (a ∷ Type). Eq a ⇒ Show a ⇒ Milliseconds -> a -> a → ProcessM a Unit
-awaitWithTimeout duration toMsg expected = do
-  msg <- receiveWithTimeout duration toMsg
-  liftEffect $ assertEqual { actual: msg, expected }
+data TimeoutMsg = TimeoutMsg
+derive instance Eq TimeoutMsg
+instance Show TimeoutMsg where
+  show TimeoutMsg = "TimeoutMsg"
+
+awaitTimeout :: Milliseconds -> Effect Unit
+awaitTimeout duration = do
+  msg <- Raw.receiveWithTimeout duration TimeoutMsg
+  liftEffect $ assertEqual { actual: msg, expected: TimeoutMsg }
 
 sender :: Process RunnerMsg -> Metadata -> Maybe RunnerMsg -> ProcessM SenderRequest Unit
 sender parent initialMd initResp = do
